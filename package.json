@@ -1,0 +1,9 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@google/genai": "^0.8.0",
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.7",
+    "nodemailer": "^6.10.0"
+  }
+}
