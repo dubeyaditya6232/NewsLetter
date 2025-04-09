@@ -41,10 +41,10 @@ export const fetchFromGNews = async () => {
         return [];
     }
     if (!response?.data?.articles) {
-        console.error('No articles found in NewsAPI response');
+        console.error('No articles found in GNewsAPI response');
         return [];
     }
-    console.log('Articles fetched from NewsAPI:', response.data.articles.length);
+    console.log('Articles fetched from GNewsAPI:', response.data.articles.length);
     return response?.data.articles.map(article => ({
         title: article.title,
         url: article.url,

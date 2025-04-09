@@ -1,21 +1,11 @@
 import dotenv from "dotenv";
 dotenv.config();
 import fs from "fs";
-import { GoogleGenAI } from "@google/genai";
 import { sendEmail } from "./mail/mail.js";
 import { fetchFromGNews, fetchFromNewsAPI } from "./articles.js";
 
-// console.log("Google GenAI API Key:", process.env.GOOGLE_API_KEY);
 
-const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
-
-const genAI_call = async () => {
-    const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash",
-        contents: "Explain how AI works in a few words",
-    });
-    console.log(response.text);
-}
+const maxRetries = 3;
 
 async function rankArticlesWithLLM(articles) {
     const prompt = `You are an expert AI assistant that filters and ranks news articles about generative AI.
@@ -25,31 +15,43 @@ async function rankArticlesWithLLM(articles) {
     Here are the articles:
   ${articles.map((a, i) => `${i + 1}. Title: ${a.title}\nURL: ${a.url}`).join('\n\n')}
   Return the top articles in a JSON array sorted by importance with keys: title, summary, url.`;
+    const requestPayload = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }]
+    };
 
-    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + process.env.GOOGLE_API_KEY, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }]
-        })
-    });
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
 
-    const data = await response.json();
-    const content = data.candidates?.[0]?.content?.parts?.[0]?.text;
+            const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + process.env.GOOGLE_API_KEY, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestPayload),
+                signal: controller.signal
+            });
+            clearTimeout(timeout);
 
-    try {
-        const jsonMatch = content.match(/\[.*\]/s);
-        if (jsonMatch) {
-            return JSON.parse(jsonMatch[0]).slice(0, 50);
-        } else {
-            throw new Error('No valid JSON found in Gemini response.');
+            const data = await response.json();
+            const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (!content) throw new Error('Gemini returned no content');
+            const jsonMatch = content.match(/\[.*\]/s);
+            if (!jsonMatch) throw new Error('No valid JSON array found in Gemini response');
+
+            const parsed = JSON.parse(jsonMatch[0]);
+            return parsed.slice(0, 50);
         }
-    } catch (err) {
-        console.error('Failed to parse Gemini response:', content);
-        console.error('Error:', err.message);
-        return articles.slice(0, 50);
+        catch (err) {
+            console.error(`Attempt ${attempt} failed:`, err.message);
+            if (attempt === maxRetries) {
+                console.warn('Max retries reached. Falling back to original article list.');
+                return articles.slice(0, 50);
+            }
+            await new Promise(res => setTimeout(res, 1000 * attempt));
+        }
     }
 }
 
