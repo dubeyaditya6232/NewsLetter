@@ -1,342 +1,324 @@
 import pandas as pd
-import xml.etree.ElementTree as ET
-from collections import Counter
-
-# Assuming df contains your Excel data with XML in a column named 'xml_column'
-def parse_rule(xml_str):
-    try:
-        root = ET.fromstring(xml_str)
-        rule_data = {
-            'rule_id': root.attrib.get('internalID'),
-            'rule_name': root.attrib.get('name'),
-            'rule_identifier': root.attrib.get('identifier'),
-            'num_actions': len(root.findall('./ruleActions/action')),
-            'num_conditions': len(root.findall('.//condition')),
-            'actions': [a.attrib.get('identifier') for a in root.findall('./ruleActions/action')],
-            'action_values': [a.attrib.get('value') for a in root.findall('./ruleActions/action')],
-            'operators': [op.attrib.get('id') for op in root.findall('.//operator')],
-            'expressions': [exp.attrib.get('expression') for exp in root.findall('.//expressionTerm')]
-        }
-        return rule_data
-    except Exception as e:
-        return None
-
-# Apply parsing to all rows
-df['parsed'] = df['xml_column'].apply(parse_rule)
-
-
-# 1)Rule Complexity Distribution:
-# Create histogram of number of actions and conditions
 import matplotlib.pyplot as plt
+import seaborn as sns
+import xml.etree.ElementTree as ET
+import random
+from faker import Faker
+from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+import numpy as np
+# Add new imports
+import networkx as nx
+from mlxtend.frequent_patterns import apriori
+from mlxtend.frequent_patterns import association_rules
+from scipy import stats
+from lxml import etree
+
+sns.set(style="whitegrid")
+
+# Step 1: Generate synthetic XML data
+fake = Faker()
+def generate_fake_xml():
+    num_actions = random.randint(1, 3)
+    num_conditions = random.randint(1, 4)
+    actions = ''.join([
+        f"<RulesAction><ActionType>{random.choice(['EmailAlert', 'BlockTransaction', 'FlagTransaction'])}</ActionType><ActionValue>{fake.word()}</ActionValue></RulesAction>"
+        for _ in range(num_actions)
+    ])
+    conditions = ''.join([
+        f"<RulesCondition><ConditionField>{random.choice(['Amount', 'Location', 'UserType'])}</ConditionField><ConditionValue>{random.randint(1, 100)}</ConditionValue></RulesCondition>"
+        for _ in range(num_conditions)
+    ])
+    return f"<Rule>{actions}{conditions}</Rule>"
+
+def generate_fake_xml_with_timestamp():
+    timestamp = fake.date_time_between(start_date='-1y', end_date='now')
+    rule = generate_fake_xml().replace('</Rule>', f'<Timestamp>{timestamp}</Timestamp></Rule>')
+    return rule, timestamp
+
+# Update DataFrame creation to include timestamps
+df = pd.DataFrame([generate_fake_xml_with_timestamp() for _ in range(1000)], 
+                 columns=['xml_column', 'timestamp'])
+
+# Step 2: Parse XML into structured columns
+def parse_xml(xml_string):
+    try:
+        root = ET.fromstring(xml_string)
+        actions, conditions = [], []
+        for action in root.findall('.//RulesAction'):
+            actions.append({elem.tag: elem.text for elem in action})
+        for condition in root.findall('.//RulesCondition'):
+            conditions.append({elem.tag: elem.text for elem in condition})
+        return actions, conditions
+    except Exception:
+        return [], []
+
+df['parsed'] = df['xml_column'].apply(parse_xml)
+df['actions'] = df['parsed'].apply(lambda x: x[0])
+df['conditions'] = df['parsed'].apply(lambda x: x[1])
+df.drop(columns='parsed', inplace=True)
+
+# Step 3: Flatten data
+actions_df = pd.json_normalize(df.explode('actions')['actions'].dropna()).reset_index(drop=True)
+conditions_df = pd.json_normalize(df.explode('conditions')['conditions'].dropna()).reset_index(drop=True)
+
+df['num_actions'] = df['actions'].apply(len)
+df['num_conditions'] = df['conditions'].apply(len)
+
+# Step 4: Visualization
+fig, axes = plt.subplots(3, 2, figsize=(16, 15))
+sns.countplot(data=actions_df, x='ActionType', ax=axes[0, 0], order=actions_df['ActionType'].value_counts().index)
+axes[0, 0].set_title('Distribution of Rule Actions')
+axes[0, 0].tick_params(axis='x', rotation=45)
+
+sns.countplot(data=conditions_df, x='ConditionField', ax=axes[0, 1], order=conditions_df['ConditionField'].value_counts().index)
+axes[0, 1].set_title('Distribution of Rule Condition Fields')
+axes[0, 1].tick_params(axis='x', rotation=45)
+
+sns.histplot(df['num_actions'], bins=range(1, 6), kde=False, ax=axes[1, 0])
+axes[1, 0].set_title('Number of Actions per Rule')
+
+sns.histplot(df['num_conditions'], bins=range(1, 6), kde=False, ax=axes[1, 1])
+axes[1, 1].set_title('Number of Conditions per Rule')
+
+conditions_df['ConditionValue'] = conditions_df['ConditionValue'].astype(int)
+sns.boxplot(data=conditions_df, x='ConditionField', y='ConditionValue', ax=axes[2, 0])
+axes[2, 0].set_title('Condition Values by Field')
+
+pivot = pd.merge(conditions_df, actions_df, left_index=True, right_index=True, how='inner')
+pivot['ConditionValue'] = pivot['ConditionValue'].astype(int)
+heatmap_data = pivot.pivot_table(index='ConditionField', columns='ActionType', values='ConditionValue', aggfunc='mean')
+sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap='coolwarm', ax=axes[2, 1])
+axes[2, 1].set_title('Avg. Condition Value per Field & Action Type')
+plt.tight_layout()
+plt.show()
+
+# Step 5: Extended EDA
+plt.figure(figsize=(8, 5))
+sns.scatterplot(data=df, x='num_conditions', y='num_actions', alpha=0.5)
+plt.title('Rule Complexity: Number of Conditions vs Actions')
+plt.xlabel('Number of Conditions')
+plt.ylabel('Number of Actions')
+plt.tight_layout()
+plt.show()
+
+# Duplicates
+df['action_keys'] = df['actions'].apply(lambda x: tuple(sorted(f"{i.get('ActionType')}:{i.get('ActionValue')}" for i in x)))
+df['condition_keys'] = df['conditions'].apply(lambda x: tuple(sorted(f"{i.get('ConditionField')}:{i.get('ConditionValue')}" for i in x)))
+df['rule_signature'] = df.apply(lambda row: (row['action_keys'], row['condition_keys']), axis=1)
+duplicate_rules = df['rule_signature'].value_counts()
+
+# Add after the duplicate_rules calculation
+
+# Enhanced Redundancy Analysis
+def analyze_redundancies(df):
+    # 1. Exact duplicates
+    exact_duplicates = df['rule_signature'].value_counts()
+    
+    # 2. Action pattern redundancy
+    action_patterns = df['action_keys'].value_counts()
+    
+    # 3. Condition pattern redundancy
+    condition_patterns = df['condition_keys'].value_counts()
+    
+    # 4. Semantic redundancy (similar rules with different values)
+    def get_semantic_pattern(row):
+        actions = tuple(sorted(a['ActionType'] for a in row['actions']))
+        conditions = tuple(sorted(c['ConditionField'] for c in row['conditions']))
+        return (actions, conditions)
+    
+    df['semantic_pattern'] = df.apply(get_semantic_pattern, axis=1)
+    semantic_duplicates = df['semantic_pattern'].value_counts()
+    
+    return {
+        'exact_duplicates': exact_duplicates,
+        'action_patterns': action_patterns,
+        'condition_patterns': condition_patterns,
+        'semantic_duplicates': semantic_duplicates
+    }
+
+redundancy_analysis = analyze_redundancies(df)
+
+# Visualize redundancy metrics
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+# Plot top 10 exact duplicates
+redundancy_analysis['exact_duplicates'].head(10).plot(kind='bar', ax=axes[0,0])
+axes[0,0].set_title('Top 10 Exact Rule Duplicates')
+axes[0,0].tick_params(axis='x', rotation=45)
+
+# Plot top 10 action patterns
+redundancy_analysis['action_patterns'].head(10).plot(kind='bar', ax=axes[0,1])
+axes[0,1].set_title('Top 10 Action Patterns')
+axes[0,1].tick_params(axis='x', rotation=45)
+
+# Plot top 10 condition patterns
+redundancy_analysis['condition_patterns'].head(10).plot(kind='bar', ax=axes[1,0])
+axes[1,0].set_title('Top 10 Condition Patterns')
+axes[1,0].tick_params(axis='x', rotation=45)
+
+# Plot top 10 semantic duplicates
+redundancy_analysis['semantic_duplicates'].head(10).plot(kind='bar', ax=axes[1,1])
+axes[1,1].set_title('Top 10 Semantic Duplicates')
+axes[1,1].tick_params(axis='x', rotation=45)
+
+plt.tight_layout()
+plt.show()
+
+# Calculate redundancy metrics
+print("\nRedundancy Metrics:")
+print(f"Total unique rules: {len(df)}")
+print(f"Unique exact rules: {len(redundancy_analysis['exact_duplicates'])}")
+print(f"Unique action patterns: {len(redundancy_analysis['action_patterns'])}")
+print(f"Unique condition patterns: {len(redundancy_analysis['condition_patterns'])}")
+print(f"Unique semantic patterns: {len(redundancy_analysis['semantic_duplicates'])}")
+
+# Calculate redundancy percentages
+total_rules = len(df)
+redundancy_percentages = {
+    'Exact Duplicates': (1 - len(redundancy_analysis['exact_duplicates'])/total_rules) * 100,
+    'Action Pattern': (1 - len(redundancy_analysis['action_patterns'])/total_rules) * 100,
+    'Condition Pattern': (1 - len(redundancy_analysis['condition_patterns'])/total_rules) * 100,
+    'Semantic': (1 - len(redundancy_analysis['semantic_duplicates'])/total_rules) * 100
+}
+
+# Plot redundancy percentages
+plt.figure(figsize=(10, 6))
+plt.bar(redundancy_percentages.keys(), redundancy_percentages.values())
+plt.title('Rule Redundancy Percentages')
+plt.ylabel('Redundancy %')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# Field importance
+field_importance = conditions_df['ConditionField'].value_counts()
+
+# Action-Condition Linkage Matrix
+mlb_conditions = MultiLabelBinarizer()
+mlb_actions = MultiLabelBinarizer()
+condition_matrix = mlb_conditions.fit_transform(df['condition_keys'])
+action_matrix = mlb_actions.fit_transform(df['action_keys'])
+condition_df = pd.DataFrame(condition_matrix, columns=mlb_conditions.classes_)
+action_df = pd.DataFrame(action_matrix, columns=mlb_actions.classes_)
+linkage_matrix = pd.DataFrame(np.dot(condition_df.T, action_df), index=condition_df.columns, columns=action_df.columns)
+
+plt.figure(figsize=(10, 6))
+sns.heatmap(linkage_matrix, annot=True, fmt='d', cmap='YlGnBu')
+plt.title('Action-Condition Field Linkage Matrix')
+plt.tight_layout()
+plt.show()
+
+# Outliers
+plt.figure(figsize=(8, 5))
+sns.boxplot(data=conditions_df, x='ConditionField', y='ConditionValue')
+plt.title('Outliers in Condition Values')
+plt.tight_layout()
+plt.show()
+
+# Clustering
+rule_vectors = np.hstack([condition_matrix, action_matrix])
+inertia = []
+sil_scores = []
+K_range = range(2, 7)
+for k in K_range:
+    km = KMeans(n_clusters=k, random_state=42)
+    labels = km.fit_predict(rule_vectors)
+    inertia.append(km.inertia_)
+    sil_scores.append(silhouette_score(rule_vectors, labels))
 
 plt.figure(figsize=(12, 5))
 plt.subplot(1, 2, 1)
-df['parsed'].apply(lambda x: x['num_actions']).hist()
-plt.title('Distribution of Actions per Rule')
+plt.plot(K_range, inertia, marker='o')
+plt.title('KMeans Inertia vs K')
+plt.xlabel('K')
+plt.ylabel('Inertia')
 
 plt.subplot(1, 2, 2)
-df['parsed'].apply(lambda x: x['num_conditions']).hist()
-plt.title('Distribution of Conditions per Rule')
+plt.plot(K_range, sil_scores, marker='o')
+plt.title('Silhouette Score vs K')
+plt.xlabel('K')
+plt.ylabel('Silhouette Score')
 plt.tight_layout()
+plt.show()
 
+# Add Rule Complexity Analysis
+def calculate_rule_complexity(row):
+    action_weight = 1.5
+    condition_weight = 1.0
+    
+    complexity = (row['num_actions'] * action_weight + 
+                 row['num_conditions'] * condition_weight)
+    
+    unique_actions = len(set(a['ActionType'] for a in row['actions']))
+    unique_conditions = len(set(c['ConditionField'] for c in row['conditions']))
+    
+    return complexity * (1 + (unique_actions + unique_conditions) / 10)
 
-# 2)Action Types analysis
-# Flatten all actions and count frequencies
-all_actions = []
-for p in df['parsed']:
-    if p:
-        all_actions.extend(p['actions'])
+df['rule_complexity'] = df.apply(calculate_rule_complexity, axis=1)
 
-action_counts = Counter(all_actions)
-pd.Series(action_counts).sort_values(ascending=False).plot(kind='bar', figsize=(12, 6))
-plt.title('Most Common Action Types')
+# Visualize complexity distribution
+plt.figure(figsize=(10, 6))
+sns.histplot(data=df, x='rule_complexity', bins=30)
+plt.title('Distribution of Rule Complexity')
+plt.show()
 
-#3)Operator Usage:
+# Network Analysis
+def create_rule_network(actions_df, conditions_df):
+    G = nx.Graph()
+    for _, condition in conditions_df.iterrows():
+        for _, action in actions_df.iterrows():
+            G.add_edge(f"C:{condition['ConditionField']}", 
+                      f"A:{action['ActionType']}", 
+                      weight=1)
+    return G
 
-# Count operator frequencies
-all_operators = []
-for p in df['parsed']:
-    if p:
-        all_operators.extend(p['operators'])
-
-operator_counts = Counter(all_operators)
-pd.Series(operator_counts).plot(kind='pie', figsize=(10, 10), autopct='%1.1f%%')
-plt.title('Operator Distribution')
-
-
-# 4)Expression Pattern Analysis:
-
-# Extract common patterns from expressions
-import re
-
-def extract_pattern(expr):
-    if not expr:
-        return None
-    # Extract function names or list references
-    matches = re.findall(r'\[([^\]]+)\]|(\w+)\s*\(', expr)
-    return [m[0] or m[1] for m in matches if any(m)]
-
-all_patterns = []
-for p in df['parsed']:
-    if p:
-        for expr in p['expressions']:
-            patterns = extract_pattern(expr)
-            if patterns:
-                all_patterns.extend(patterns)
-
-pattern_counts = Counter(all_patterns)
-pd.Series(pattern_counts).head(15).plot(kind='bar', figsize=(12, 6))
-plt.title('Common Expression Patterns')
-
-
-# 5)Rule Clustering:
-
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.cluster import KMeans
-
-# Create feature vectors based on actions and operators
-def create_feature_text(rule_data):
-    if not rule_data:
-        return ""
-    features = []
-    features.extend([f"action_{a}" for a in rule_data['actions']])
-    features.extend([f"op_{o}" for o in rule_data['operators']])
-    return " ".join(features)
-
-df['feature_text'] = df['parsed'].apply(create_feature_text)
-
-# Vectorize and cluster
-vectorizer = CountVectorizer()
-X = vectorizer.fit_transform(df['feature_text'])
-
-kmeans = KMeans(n_clusters=5)  # Adjust number of clusters as needed
-df['cluster'] = kmeans.fit_predict(X)
-
-# Analyze clusters
-cluster_stats = df.groupby('cluster').agg({
-    'parsed': lambda x: len(x),
-    'rule_identifier': lambda x: list(set([p['rule_identifier'] for p in x if p]))[:5]
-}).rename(columns={'parsed': 'count'})
-
-print(cluster_stats)
-
-
-# 6)Similarity Matrix:
-
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-
-# Create similarity matrix (for a subset if 1000+ is too large)
-sample_size = min(100, len(df))  # Adjust sample size as needed
-sample_df = df.sample(sample_size)
-
-X_sample = vectorizer.transform(sample_df['feature_text'])
-similarity = cosine_similarity(X_sample)
-
-plt.figure(figsize=(10, 8))
-plt.imshow(similarity, cmap='viridis')
-plt.colorbar()
-plt.title('Rule Similarity Matrix')
-
-
-
-# Network Analysis for Rule Redundancy Detection
-# Based on your XML rule example (showing a rule named "Non IOS Watch List is TRUE"), I can provide guidance on implementing network analysis to detect redundancies in your collection of XML rules.
-
-# Network Analysis Approach
-# Network analysis is particularly effective for visualizing and detecting redundancies in rule-based systems. For your XML rules, this approach creates a graph representation where rules are connected based on their similarities in structure, conditions, and actions.
-
-# Creating the Rule Network
-# Node Definition:
-
-# Each rule becomes a node in the network
-# Node attributes can include rule name, identifier, and other metadata
-
-# Edge Definition:
-# Create edges between rules based on similarity metrics
-# Edge weight can represent the degree of similarity
-# Consider connections based on:
-# Shared actions (e.g., "Alert" actions)
-# Similar conditions (e.g., IS_TRUE operators)
-# Common expressions (e.g., references to the same match lists)
-
-# Implementation with NetworkX:
-
-
-import networkx as nx
-import matplotlib.pyplot as plt
-
-# Create graph
-G = nx.Graph()
-
-# Add nodes (rules)
-for rule_data in parsed_rules:
-    G.add_node(rule_data['rule_id'], 
-               name=rule_data['rule_name'], 
-               identifier=rule_data['rule_identifier'])
-
-# Add edges based on similarity
-for i, rule1 in enumerate(parsed_rules):
-    for j, rule2 in enumerate(parsed_rules[i+1:], i+1):
-        similarity = calculate_similarity(rule1, rule2)
-        if similarity > threshold:
-            G.add_edge(rule1['rule_id'], rule2['rule_id'], 
-                       weight=similarity)
-
-# Visualize
+plt.figure(figsize=(12, 8))
+G = create_rule_network(actions_df, conditions_df)
 pos = nx.spring_layout(G)
-nx.draw(G, pos, with_labels=True)
+nx.draw(G, pos, with_labels=True, node_color='lightblue', 
+        node_size=1500, font_size=8)
+plt.title('Rule Components Network')
 plt.show()
 
-
-# Rule Redundancy Detection
-# Once you've created the network representation, you can apply various techniques to identify redundant rules:
-
-# 1. Cluster Analysis
-# Identify clusters of highly similar rules using community detection algorithms:
-
-
-from networkx.algorithms import community
-
-# Find communities of similar rules
-communities = community.greedy_modularity_communities(G)
-
-# Print clusters of potentially redundant rules
-for i, community in enumerate(communities):
-    print(f"Cluster {i+1}:")
-    for rule_id in community:
-        rule_name = G.nodes[rule_id]['name']
-        print(f"  - {rule_name}")
-
-
-# 2. Similarity Coefficient Calculation
-# Calculate similarity coefficients between rules to identify potential redundancies:
-
-def calculate_similarity(rule1, rule2):
-    """Calculate similarity between two rules based on shared elements"""
-    # Similarity based on actions
-    actions1 = set(rule1['actions'])
-    actions2 = set(rule2['actions'])
-    action_similarity = len(actions1.intersection(actions2)) / len(actions1.union(actions2))
+# Pattern Mining
+def mine_rule_patterns(df):
+    pattern_df = pd.DataFrame()
     
-    # Similarity based on conditions/operators
-    operators1 = set(rule1['operators'])
-    operators2 = set(rule2['operators'])
-    operator_similarity = len(operators1.intersection(operators2)) / len(operators1.union(operators2))
-    
-    # Similarity based on expressions
-    expr1 = set(rule1['expressions'])
-    expr2 = set(rule2['expressions'])
-    expr_similarity = len(expr1.intersection(expr2)) / len(expr1.union(expr2))
-    
-    # Weighted average
-    return 0.4 * action_similarity + 0.3 * operator_similarity + 0.3 * expr_similarity
-
-
-# 3. Identifying Redundant Rule Patterns
-# Look for specific patterns that indicate redundancy:
-# Subset Rules: Rules where one rule's conditions and actions are a subset of another
-# Conflicting Rules: Rules with similar conditions but different actions
-# Near-Duplicate Rules: Rules with high similarity coefficients (e.g., > 0.8)
-
-
-def find_redundant_patterns(parsed_rules):
-    redundancies = []
-    
-    for i, rule1 in enumerate(parsed_rules):
-        for j, rule2 in enumerate(parsed_rules[i+1:], i+1):
-            # Check for subset relationship
-            if is_subset(rule1, rule2):
-                redundancies.append((rule1['rule_id'], rule2['rule_id'], 'subset'))
+    for action in df['actions']:
+        for a in action:
+            col_name = f"action_{a['ActionType']}"
+            pattern_df[col_name] = 1
             
-            # Check for near-duplicates
-            similarity = calculate_similarity(rule1, rule2)
-            if similarity > 0.8:
-                redundancies.append((rule1['rule_id'], rule2['rule_id'], 'near-duplicate'))
+    for condition in df['conditions']:
+        for c in condition:
+            col_name = f"condition_{c['ConditionField']}"
+            pattern_df[col_name] = 1
     
-    return redundancies
+    frequent_patterns = apriori(pattern_df, min_support=0.1, use_colnames=True)
+    rules = association_rules(frequent_patterns, metric="confidence", min_threshold=0.5)
+    return rules
 
+pattern_rules = mine_rule_patterns(df)
+print("\nTop 5 Rule Patterns:")
+print(pattern_rules.head())
 
+# Statistical Analysis
+chi2, p_value = stats.chi2_contingency(
+    pd.crosstab(conditions_df['ConditionField'], actions_df['ActionType'])
+)
+print(f"\nChi-square test p-value: {p_value:.4f}")
 
-# 4. Bayesian Network Approach
-# For more sophisticated analysis, implement a Bayesian Network approach as mentioned in the research:
+# Rule Validation
+def validate_rule_structure(xml_string):
+    try:
+        etree.fromstring(xml_string)
+        return True
+    except etree.XMLSyntaxError:
+        return False
 
+df['is_valid'] = df['xml_column'].apply(validate_rule_structure)
+print(f"\nValid Rules: {df['is_valid'].mean()*100:.2f}%")
 
-from pgmpy.models import BayesianNetwork
-from pgmpy.factors.discrete import TabularCPD
-
-# Create a simple Bayesian Network for rule similarity
-model = BayesianNetwork([
-    ('same_action', 'is_redundant'),
-    ('same_condition', 'is_redundant'),
-    ('same_expression', 'is_redundant')
-])
-
-# Define conditional probability distributions
-# (This is a simplified example)
-cpd_action = TabularCPD('same_action', 2, [[0.5], [0.5]])
-cpd_condition = TabularCPD('same_condition', 2, [[0.5], [0.5]])
-cpd_expression = TabularCPD('same_expression', 2, [[0.5], [0.5]])
-cpd_redundant = TabularCPD('is_redundant', 2, 
-                           [[0.1, 0.3, 0.3, 0.5, 0.3, 0.5, 0.5, 0.9],
-                            [0.9, 0.7, 0.7, 0.5, 0.7, 0.5, 0.5, 0.1]],
-                           evidence=['same_action', 'same_condition', 'same_expression'],
-                           evidence_card=[2, 2, 2])
-
-model.add_cpds(cpd_action, cpd_condition, cpd_expression, cpd_redundant)
-
-
-# Visualization and Reporting
-# After identifying potential redundancies, create visualizations and reports:
-
-
-#Heatmap of Rule Similarities:
-
-
-import seaborn as sns
-
-# Create similarity matrix
-similarity_matrix = np.zeros((len(parsed_rules), len(parsed_rules)))
-for i, rule1 in enumerate(parsed_rules):
-    for j, rule2 in enumerate(parsed_rules):
-        similarity_matrix[i][j] = calculate_similarity(rule1, rule2)
-
-# Plot heatmap
-sns.heatmap(similarity_matrix, xticklabels=[r['rule_name'] for r in parsed_rules],
-            yticklabels=[r['rule_name'] for r in parsed_rules])
-plt.title('Rule Similarity Matrix')
-plt.show()
-
-
-# Network Visualization of Similar Rules:
-
-
-# Color nodes by cluster
-colors = []
-for node in G:
-    for i, comm in enumerate(communities):
-        if node in comm:
-            colors.append(i)
-            break
-
-# Draw network with community colors
-nx.draw(G, pos, node_color=colors, with_labels=True)
-plt.title('Rule Similarity Network')
-plt.show()
-
-# Redundancy Report:
-
-def generate_redundancy_report(redundancies, parsed_rules):
-    report = []
-    for rule1_id, rule2_id, redundancy_type in redundancies:
-        rule1 = next(r for r in parsed_rules if r['rule_id'] == rule1_id)
-        rule2 = next(r for r in parsed_rules if r['rule_id'] == rule2_id)
-        report.append({
-            'rule1_name': rule1['rule_name'],
-            'rule2_name': rule2['rule_name'],
-            'redundancy_type': redundancy_type,
-            'similarity': calculate_similarity(rule1, rule2),
-            'recommendation': get_recommendation(redundancy_type)
-        })
-    return pd.DataFrame(report)
-# By implementing these network analysis techniques, you can effectively identify redundant rules in your XML dataset, leading to a more optimized and maintainable rule base.
+#pip install mlxtend networkx lxml
