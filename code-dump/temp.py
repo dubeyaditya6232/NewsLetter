@@ -41,38 +41,40 @@ def generate_fake_xml_with_timestamp():
 df = pd.DataFrame([generate_fake_xml_with_timestamp() for _ in range(1000)], 
                  columns=['xml_column', 'timestamp'])
 
-# Step 2: Parse XML into structured columns
-def parse_xml(xml_string):
-    try:
-        root = ET.fromstring(xml_string)
-        actions, conditions = [], []
-        for action in root.findall('.//RulesAction'):
-            actions.append({elem.tag: elem.text for elem in action})
-        for condition in root.findall('.//RulesCondition'):
-            conditions.append({elem.tag: elem.text for elem in condition})
-        return actions, conditions
-    except Exception:
-        return [], []
+# Step 3: Modified Flatten data logic
+def flatten_dict_list(dict_list):
+    flattened = []
+    for d in dict_list:
+        if d:  # Only process non-empty dictionaries
+            for key, value in d.items():
+                flattened.append({'action_type': key, 'action_value': value})
+    return flattened
 
-df['parsed'] = df['xml_column'].apply(parse_xml)
-df['actions'] = df['parsed'].apply(lambda x: x[0])
-df['conditions'] = df['parsed'].apply(lambda x: x[1])
-df.drop(columns='parsed', inplace=True)
+def flatten_condition_dict_list(dict_list):
+    flattened = []
+    for d in dict_list:
+        if d:  # Only process non-empty dictionaries
+            for key, value in d.items():
+                flattened.append({'condition_field': key, 'condition_value': value})
+    return flattened
 
-# Step 3: Flatten data
-actions_df = pd.json_normalize(df.explode('actions')['actions'].dropna()).reset_index(drop=True)
-conditions_df = pd.json_normalize(df.explode('conditions')['conditions'].dropna()).reset_index(drop=True)
+# Create flattened DataFrames
+actions_df = pd.DataFrame([item for sublist in df['actions'].apply(flatten_dict_list) for item in sublist])
+conditions_df = pd.DataFrame([item for sublist in df['conditions'].apply(flatten_condition_dict_list) for item in sublist])
 
-df['num_actions'] = df['actions'].apply(len)
-df['num_conditions'] = df['conditions'].apply(len)
+# Update column references throughout the code
+df['num_actions'] = df['actions'].apply(lambda x: len([d for d in x if d]))
+df['num_conditions'] = df['conditions'].apply(lambda x: len([d for d in x if d]))
 
-# Step 4: Visualization
+# Update visualization code
 fig, axes = plt.subplots(3, 2, figsize=(16, 15))
-sns.countplot(data=actions_df, x='ActionType', ax=axes[0, 0], order=actions_df['ActionType'].value_counts().index)
+sns.countplot(data=actions_df, x='action_type', ax=axes[0, 0], 
+              order=actions_df['action_type'].value_counts().index)
 axes[0, 0].set_title('Distribution of Rule Actions')
 axes[0, 0].tick_params(axis='x', rotation=45)
 
-sns.countplot(data=conditions_df, x='ConditionField', ax=axes[0, 1], order=conditions_df['ConditionField'].value_counts().index)
+sns.countplot(data=conditions_df, x='condition_field', ax=axes[0, 1], 
+              order=conditions_df['condition_field'].value_counts().index)
 axes[0, 1].set_title('Distribution of Rule Condition Fields')
 axes[0, 1].tick_params(axis='x', rotation=45)
 
@@ -82,13 +84,18 @@ axes[1, 0].set_title('Number of Actions per Rule')
 sns.histplot(df['num_conditions'], bins=range(1, 6), kde=False, ax=axes[1, 1])
 axes[1, 1].set_title('Number of Conditions per Rule')
 
-conditions_df['ConditionValue'] = conditions_df['ConditionValue'].astype(int)
-sns.boxplot(data=conditions_df, x='ConditionField', y='ConditionValue', ax=axes[2, 0])
+conditions_df['condition_value'] = pd.to_numeric(conditions_df['condition_value'], errors='coerce')
+sns.boxplot(data=conditions_df, x='condition_field', y='condition_value', ax=axes[2, 0])
 axes[2, 0].set_title('Condition Values by Field')
 
+# Update pivot table creation
 pivot = pd.merge(conditions_df, actions_df, left_index=True, right_index=True, how='inner')
-pivot['ConditionValue'] = pivot['ConditionValue'].astype(int)
-heatmap_data = pivot.pivot_table(index='ConditionField', columns='ActionType', values='ConditionValue', aggfunc='mean')
+heatmap_data = pivot.pivot_table(
+    index='condition_field', 
+    columns='action_type', 
+    values='condition_value', 
+    aggfunc='mean'
+)
 sns.heatmap(heatmap_data, annot=True, fmt=".1f", cmap='coolwarm', ax=axes[2, 1])
 axes[2, 1].set_title('Avg. Condition Value per Field & Action Type')
 plt.tight_layout()
@@ -104,12 +111,14 @@ plt.tight_layout()
 plt.show()
 
 # Duplicates
-df['action_keys'] = df['actions'].apply(lambda x: tuple(sorted(f"{i.get('ActionType')}:{i.get('ActionValue')}" for i in x)))
-df['condition_keys'] = df['conditions'].apply(lambda x: tuple(sorted(f"{i.get('ConditionField')}:{i.get('ConditionValue')}" for i in x)))
+df['action_keys'] = df['actions'].apply(
+    lambda x: tuple(sorted(f"{k}:{v}" for d in x for k, v in d.items() if d))
+)
+df['condition_keys'] = df['conditions'].apply(
+    lambda x: tuple(sorted(f"{k}:{v}" for d in x for k, v in d.items() if d))
+)
 df['rule_signature'] = df.apply(lambda row: (row['action_keys'], row['condition_keys']), axis=1)
 duplicate_rules = df['rule_signature'].value_counts()
-
-# Add after the duplicate_rules calculation
 
 # Enhanced Redundancy Analysis
 def analyze_redundancies(df):
@@ -124,8 +133,8 @@ def analyze_redundancies(df):
     
     # 4. Semantic redundancy (similar rules with different values)
     def get_semantic_pattern(row):
-        actions = tuple(sorted(a['ActionType'] for a in row['actions']))
-        conditions = tuple(sorted(c['ConditionField'] for c in row['conditions']))
+        actions = tuple(sorted(k for d in row['actions'] for k in d.keys() if d))
+        conditions = tuple(sorted(k for d in row['conditions'] for k in d.keys() if d))
         return (actions, conditions)
     
     df['semantic_pattern'] = df.apply(get_semantic_pattern, axis=1)
@@ -193,7 +202,7 @@ plt.tight_layout()
 plt.show()
 
 # Field importance
-field_importance = conditions_df['ConditionField'].value_counts()
+field_importance = conditions_df['condition_field'].value_counts()
 
 # Action-Condition Linkage Matrix
 mlb_conditions = MultiLabelBinarizer()
@@ -212,7 +221,7 @@ plt.show()
 
 # Outliers
 plt.figure(figsize=(8, 5))
-sns.boxplot(data=conditions_df, x='ConditionField', y='ConditionValue')
+sns.boxplot(data=conditions_df, x='condition_field', y='condition_value')
 plt.title('Outliers in Condition Values')
 plt.tight_layout()
 plt.show()
@@ -251,8 +260,8 @@ def calculate_rule_complexity(row):
     complexity = (row['num_actions'] * action_weight + 
                  row['num_conditions'] * condition_weight)
     
-    unique_actions = len(set(a['ActionType'] for a in row['actions']))
-    unique_conditions = len(set(c['ConditionField'] for c in row['conditions']))
+    unique_actions = len(set(a['action_type'] for a in row['actions']))
+    unique_conditions = len(set(c['condition_field'] for c in row['conditions']))
     
     return complexity * (1 + (unique_actions + unique_conditions) / 10)
 
@@ -269,8 +278,8 @@ def create_rule_network(actions_df, conditions_df):
     G = nx.Graph()
     for _, condition in conditions_df.iterrows():
         for _, action in actions_df.iterrows():
-            G.add_edge(f"C:{condition['ConditionField']}", 
-                      f"A:{action['ActionType']}", 
+            G.add_edge(f"C:{condition['condition_field']}", 
+                      f"A:{action['action_type']}", 
                       weight=1)
     return G
 
@@ -286,16 +295,20 @@ plt.show()
 def mine_rule_patterns(df):
     pattern_df = pd.DataFrame()
     
-    for action in df['actions']:
-        for a in action:
-            col_name = f"action_{a['ActionType']}"
-            pattern_df[col_name] = 1
-            
-    for condition in df['conditions']:
-        for c in condition:
-            col_name = f"condition_{c['ConditionField']}"
-            pattern_df[col_name] = 1
+    for idx, row in df.iterrows():
+        for action_dict in row['actions']:
+            if action_dict:
+                for action_type in action_dict.keys():
+                    col_name = f"action_{action_type}"
+                    pattern_df.at[idx, col_name] = 1
+                    
+        for condition_dict in row['conditions']:
+            if condition_dict:
+                for condition_field in condition_dict.keys():
+                    col_name = f"condition_{condition_field}"
+                    pattern_df.at[idx, col_name] = 1
     
+    pattern_df = pattern_df.fillna(0)
     frequent_patterns = apriori(pattern_df, min_support=0.1, use_colnames=True)
     rules = association_rules(frequent_patterns, metric="confidence", min_threshold=0.5)
     return rules
@@ -306,7 +319,7 @@ print(pattern_rules.head())
 
 # Statistical Analysis
 chi2, p_value = stats.chi2_contingency(
-    pd.crosstab(conditions_df['ConditionField'], actions_df['ActionType'])
+    pd.crosstab(conditions_df['condition_field'], actions_df['action_type'])
 )
 print(f"\nChi-square test p-value: {p_value:.4f}")
 
