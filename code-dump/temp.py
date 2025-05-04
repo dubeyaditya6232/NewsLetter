@@ -110,6 +110,71 @@ plt.ylabel('Number of Actions')
 plt.tight_layout()
 plt.show()
 
+# Add after existing visualizations but before pattern mining
+
+# Calculate and print key insights
+print("\nKey Rule System Insights:")
+
+# 1. Rule Complexity Distribution
+print("\n1. Rule Complexity:")
+print(f"Average rule complexity: {df['rule_complexity'].mean():.2f}")
+print(f"Most common complexity range: {df['rule_complexity'].mode()[0]:.2f}")
+print(f"Complexity variation (std): {df['rule_complexity'].std():.2f}")
+
+# 2. Action Type Analysis
+print("\n2. Action Distribution:")
+action_dist = actions_df['action_type'].value_counts(normalize=True) * 100
+for action, pct in action_dist.items():
+    print(f"{action}: {pct:.1f}%")
+print(f"Most common action: {action_dist.index[0]}")
+
+# 3. Condition Analysis
+print("\n3. Condition Field Usage:")
+cond_dist = conditions_df['condition_field'].value_counts(normalize=True) * 100
+for field, pct in cond_dist.items():
+    print(f"{field}: {pct:.1f}%")
+
+# 4. Rule Structure
+print("\n4. Rule Structure:")
+print(f"Average actions per rule: {df['num_actions'].mean():.2f}")
+print(f"Average conditions per rule: {df['num_conditions'].mean():.2f}")
+print(f"Most complex rule has {df['num_actions'].max()} actions and {df['num_conditions'].max()} conditions")
+
+# 5. Redundancy Analysis
+print("\n5. Redundancy Analysis:")
+print(f"Exact duplicate rules: {(1 - len(df['rule_signature'].unique()) / len(df)) * 100:.1f}%")
+print(f"Action pattern redundancy: {(1 - len(df['action_keys'].unique()) / len(df)) * 100:.1f}%")
+print(f"Condition pattern redundancy: {(1 - len(df['condition_keys'].unique()) / len(df)) * 100:.1f}%")
+
+# 6. Temporal Analysis
+print("\n6. Temporal Analysis:")
+df['month'] = pd.to_datetime(df['timestamp']).dt.month
+monthly_rules = df['month'].value_counts().sort_index()
+peak_month = monthly_rules.idxmax()
+print(f"Peak rule creation month: {peak_month}")
+print(f"Rules per month variation (std): {monthly_rules.std():.2f}")
+
+# 7. Field Value Distribution
+print("\n7. Condition Value Distribution:")
+for field in conditions_df['condition_field'].unique():
+    field_values = conditions_df[conditions_df['condition_field'] == field]['condition_value']
+    print(f"\n{field}:")
+    print(f"  Mean: {field_values.mean():.2f}")
+    print(f"  Median: {field_values.median():.2f}")
+    print(f"  Std: {field_values.std():.2f}")
+
+# 8. Action-Condition Relationships
+print("\n8. Action-Condition Relationships:")
+pivot_counts = pd.crosstab(conditions_df['condition_field'], actions_df['action_type'])
+strongest_pairs = []
+for condition in pivot_counts.index:
+    max_action = pivot_counts.loc[condition].idxmax()
+    max_count = pivot_counts.loc[condition, max_action]
+    strongest_pairs.append((condition, max_action, max_count))
+
+for condition, action, count in sorted(strongest_pairs, key=lambda x: x[2], reverse=True):
+    print(f"{condition} → {action}: {count} occurrences")
+
 # Duplicates
 df['action_keys'] = df['actions'].apply(
     lambda x: tuple(sorted(f"{k}:{v}" for d in x for k, v in d.items() if d))
