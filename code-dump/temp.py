@@ -400,3 +400,83 @@ df['is_valid'] = df['xml_column'].apply(validate_rule_structure)
 print(f"\nValid Rules: {df['is_valid'].mean()*100:.2f}%")
 
 #pip install mlxtend networkx lxml
+
+
+def parse_xml_rule(xml_file):
+    # Parse the XML file
+    tree = ET.parse(xml_file)
+    root = tree.getroot()
+    
+    # Extract rule information
+    rule_name = root.get('name')
+    rule_id = root.get('internalID')
+    
+    print(f"Processing rule: {rule_name} (ID: {rule_id})")
+    
+    # Parse rule conditions
+    conditions = []
+    rule_condition = root.find('.//ruleCondition')
+    if rule_condition:
+        sql_condition = parse_condition_node(rule_condition)
+        conditions.append(sql_condition)
+    
+    # Return the SQL-like condition
+    return " ".join(conditions)
+
+def parse_condition_node(condition_node, indent=""):
+    result = []
+    
+    # Get condition attributes
+    condition_id = condition_node.get('identifier')
+    
+    # Check for operator
+    operator_node = condition_node.find('./operator')
+    operator_type = operator_node.get('id') if operator_node is not None else None
+    
+    # Process children conditions
+    children_node = condition_node.find('./children')
+    if children_node is not None:
+        child_conditions = []
+        for child in children_node.findall('./condition'):
+            child_result = parse_condition_node(child, indent + "  ")
+            if child_result:
+                child_conditions.append(child_result)
+        
+        # Process expression terms
+        for expr in children_node.findall('./expressionTerm'):
+            expr_id = expr.get('identifier')
+            expression = expr.get('expression')
+            if expression and expr_id:
+                child_conditions.append(f"{expression}")
+        
+        # Process value terms
+        for val in children_node.findall('./valueTerm'):
+            val_id = val.get('identifier')
+            value = val.get('value')
+            if value and val_id:
+                # If previous was an expression, this is likely a comparison
+                if len(child_conditions) > 0 and "expression" in locals():
+                    child_conditions[-1] = f"{child_conditions[-1]} = '{value}'"
+                else:
+                    child_conditions.append(f"'{value}'")
+        
+        # Process field terms
+        for field in children_node.findall('./fieldTerm'):
+            field_id = field.get('id')
+            if field_id:
+                child_conditions.append(f"{field_id}")
+        
+        # Join child conditions based on operator
+        if operator_type == "and":
+            result.append(f"({' AND '.join(child_conditions)})")
+        elif operator_type == "EQ_STR":
+            result.append(f"({' = '.join(child_conditions)})")
+        elif operator_type == "NOT_IN_LIST_STR":
+            field = child_conditions[0] if child_conditions else ""
+            values = child_conditions[1] if len(child_conditions) > 1 else ""
+            result.append(f"{field} NOT IN ({values})")
+        else:
+            result.append(f"({' '.join(child_conditions)})")
+    
+    return " ".join(result)
+
