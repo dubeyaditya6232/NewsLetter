@@ -1,10 +1,11 @@
 import os
 import json
+import logging
 import subprocess
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Optional, Dict, Any
 import xml.etree.ElementTree as ET
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import Tool, AgentExecutor, LLMSingleActionAgent
-from langchain.chat_models import ChatOpenAI
 from langchain.schema import AgentAction, AgentFinish
 from langchain.prompts import StringPromptTemplate
 from langchain.memory import ConversationBufferMemory
@@ -158,10 +159,11 @@ class GradleWriterTool(Tool):
 
         path = os.path.join(project_dir, file_name)
         try:
-            with open(path, "w") as f:
-                f.write(content)
-            return f"✅ Successfully wrote {file_name} at {path}"
+            if safe_write_file(path, content):
+                return f"✅ Successfully wrote {file_name} at {path}"
+            return f"❌ Failed to write {file_name}"
         except Exception as e:
+            logger.error(f"GradleWriterTool failed: {e}")
             return f"❌ Failed to write {file_name}: {e}"
 
 
@@ -208,7 +210,11 @@ def read_build_gradle(project_dir: str) -> str:
 
 # === GPT/Gemini call to fix build.gradle file ===
 def ask_gpt_to_fix_gradle_files(error_output: str, current_build_gradle: str) -> str:
-    llm = ChatOpenAI(model="gemini", temperature=0)
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-pro",
+        temperature=0,
+        google_api_key=os.getenv("GOOGLE_API_KEY"),
+    )
     prompt = (
         "You are an expert Gradle build engineer.\n"
         "Given the following Gradle build error output and the current build.gradle file, "
@@ -269,10 +275,11 @@ def iterative_gradle_fix(project_dir: str, max_attempts: int = 3) -> bool:
 # --- Prompt with strict JSON response instruction ---
 
 
-class MigrationPromptTemplate:
+class MigrationPromptTemplate(StringPromptTemplate):
     def format(self, **kwargs) -> str:
-        user_input = kwargs.get("input", "")
-        agent_scratchpad = kwargs.get("agent_scratchpad", "")
+        # Add type hints and validation
+        user_input: str = kwargs.get("input", "")
+        agent_scratchpad: str = kwargs.get("agent_scratchpad", "")
 
         return f"""
 You are an AI agent specialized in migrating Maven projects to Gradle.
@@ -320,9 +327,17 @@ What do you want to do next?
 
 class MavenToGradleAgent(LLMSingleActionAgent):
     def __init__(self):
-        llm = ChatOpenAI(model="gemini", temperature=0)
-        prompt = MigrationPromptTemplate()
-        super().__init__(llm=llm, prompt=prompt)
+        try:
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-pro",
+                temperature=0,
+                google_api_key=os.getenv("GOOGLE_API_KEY"),
+            )
+            prompt = MigrationPromptTemplate()
+            super().__init__(llm=llm, prompt=prompt)
+        except Exception as e:
+            logger.error(f"Failed to initialize agent: {e}")
+            raise
 
         self.tools = {
             "file_scanner": FileScannerTool(),
@@ -382,10 +397,15 @@ class MavenToGradleAgent(LLMSingleActionAgent):
             )
 
     def run_tool(self, action: AgentAction) -> str:
-        tool = self.tools.get(action.tool)
-        if not tool:
-            return f"Tool {action.tool} not found."
-        return tool._run(action.tool_input)
+        try:
+            tool = self.tools.get(action.tool)
+            if not tool:
+                logger.error(f"Tool {action.tool} not found")
+                return f"Tool {action.tool} not found."
+            return tool._run(action.tool_input)
+        except Exception as e:
+            logger.error(f"Tool execution failed: {e}")
+            return f"Tool execution failed: {e}"
 
 
 # --- Safety helpers to avoid infinite loops ---
@@ -409,37 +429,100 @@ REPEAT_THRESHOLD = 3
 
 
 def run_agent():
-    agent = MavenToGradleAgent()
-    intermediate_steps = []
-
-    # Get project directory from environment or use default
-    project_dir = os.getenv("MAVEN_PROJECT_DIR", os.path.abspath("./maven-project"))
-    if not os.path.exists(project_dir):
-        print(f"Error: Project directory not found: {project_dir}")
-        return
-
-    user_input = f"Start migration for project directory: {project_dir}"
-
-    for step in range(MAX_STEPS):
-        action_or_finish = agent.plan(
-            intermediate_steps, input=user_input, project_dir=project_dir
-        )
-
-        if isinstance(action_or_finish, AgentFinish):
-            print(f"Agent Finished: {action_or_finish.return_values['output']}")
+    try:
+        if not verify_tools_installed():
             return
 
-        observation = agent.run_tool(action_or_finish)
-        print(f"Step {step + 1}, Tool '{action_or_finish.tool}' output: {observation}")
+        agent = MavenToGradleAgent()
+        intermediate_steps: List[Tuple[AgentAction, str]] = []
 
-        intermediate_steps.append((action_or_finish, observation))
+        project_dir = os.getenv("MAVEN_PROJECT_DIR")
+        if not project_dir:
+            project_dir = os.path.abspath("./maven-project")
+            logger.warning(f"MAVEN_PROJECT_DIR not set, using default: {project_dir}")
 
-        if has_repeated_steps(intermediate_steps, REPEAT_THRESHOLD):
-            print("Detected repeated actions. Stopping to avoid infinite loop.")
+        if not os.path.exists(project_dir):
+            logger.error(f"Project directory not found: {project_dir}")
             return
 
-    print(f"Maximum steps ({MAX_STEPS}) reached. Stopping execution.")
+        if not os.path.isfile(os.path.join(project_dir, "pom.xml")):
+            logger.error(f"No pom.xml found in {project_dir}")
+            return
+
+        user_input = f"Start migration for project directory: {project_dir}"
+
+        for step in range(MAX_STEPS):
+            action_or_finish = agent.plan(
+                intermediate_steps, input=user_input, project_dir=project_dir
+            )
+
+            if isinstance(action_or_finish, AgentFinish):
+                print(f"Agent Finished: {action_or_finish.return_values['output']}")
+                return
+
+            observation = agent.run_tool(action_or_finish)
+            print(
+                f"Step {step + 1}, Tool '{action_or_finish.tool}' output: {observation}"
+            )
+
+            intermediate_steps.append((action_or_finish, observation))
+
+            if has_repeated_steps(intermediate_steps, REPEAT_THRESHOLD):
+                print("Detected repeated actions. Stopping to avoid infinite loop.")
+                return
+
+        print(f"Maximum steps ({MAX_STEPS}) reached. Stopping execution.")
+    except Exception as e:
+        logger.error(f"Agent execution failed: {e}")
+        raise
+
+
+# Improve file operation safety
+def safe_write_file(path: str, content: str) -> bool:
+    """Safely write content to file with backup."""
+    backup_path = f"{path}.bak"
+    try:
+        if os.path.exists(path):
+            os.rename(path, backup_path)
+
+        with open(path, "w") as f:
+            f.write(content)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to write file {path}: {e}")
+        if os.path.exists(backup_path):
+            os.rename(backup_path, path)
+        return False
+
+
+# Verify that required tools (Maven, Gradle) are installed
+def verify_tools_installed() -> bool:
+    """Verify that required tools (Maven, Gradle) are installed."""
+    try:
+        subprocess.run(["mvn", "--version"], capture_output=True, check=True)
+        subprocess.run(["gradle", "--version"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.error("Maven or Gradle not found. Please install required tools.")
+        return False
 
 
 if __name__ == "__main__":
-    run_agent()
+    # Set up logging before any logger usage
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+    logger = logging.getLogger(__name__)
+
+    # Add check for Google API key
+    if not os.getenv("GOOGLE_API_KEY"):
+        logger.error("GOOGLE_API_KEY environment variable not set")
+        exit(1)
+
+    try:
+        run_agent()
+    except KeyboardInterrupt:
+        logger.info("Migration interrupted by user")
+    except Exception as e:
+        logger.error(f"Migration failed: {e}")
