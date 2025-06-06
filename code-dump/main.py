@@ -9,6 +9,29 @@ class MavenToGradleConverter:
     def __init__(self, project_path: str):
         self.project_path = project_path
         self.pom_file = os.path.join(project_path, "pom.xml")
+        self.modules = []
+        self.parent_info = None
+
+    def _parse_parent(self, root) -> Optional[Dict]:
+        """Parse parent pom information"""
+        parent = root.find("parent")
+        if parent is not None:
+            return {
+                "group": self._find_element(parent, "groupId"),
+                "artifact": self._find_element(parent, "artifactId"),
+                "version": self._find_element(parent, "version"),
+            }
+        return None
+
+    def _parse_modules(self, root) -> List[str]:
+        """Parse module definitions from the parent pom.xml"""
+        modules = []
+        modules_elem = root.find("modules")
+        if modules_elem is not None:
+            for module in modules_elem.findall("module"):
+                if module.text:
+                    modules.append(module.text)
+        return modules
 
     def parse_pom(self) -> Dict:
         tree = ET.parse(self.pom_file)
@@ -19,6 +42,9 @@ class MavenToGradleConverter:
             if "}" in elem.tag:
                 elem.tag = elem.tag.split("}", 1)[1]
 
+        # Parse modules if this is the parent pom
+        self.modules = self._parse_modules(root)
+
         project_info = {
             "group": self._find_element(root, "groupId"),
             "artifact": self._find_element(root, "artifactId"),
@@ -27,6 +53,9 @@ class MavenToGradleConverter:
             "dependencies": self._parse_dependencies(root),
             "repositories": self._parse_repositories(root),
             "plugins": self._parse_plugins(root),
+            "parent": self._parse_parent(root),
+            "packaging": self._find_element(root, "packaging") or "jar",
+            "modules": self.modules,
         }
 
         return project_info
@@ -256,9 +285,74 @@ class MavenToGradleConverter:
         return "3.2.1"  # default version
 
     def generate_settings_gradle(self, project_info: Dict):
-        settings_content = f"rootProject.name = '{project_info['artifact']}'"
+        """Generate settings.gradle with module includes"""
+        settings_content = [f"rootProject.name = '{project_info['artifact']}'"]
+
+        # Add module includes
+        for module in project_info.get("modules", []):
+            module_path = module.replace("/", ":")
+            settings_content.append(f"include '{module_path}'")
+
         with open(os.path.join(self.project_path, "settings.gradle"), "w") as f:
-            f.write(settings_content)
+            f.write("\n".join(settings_content))
+
+    def generate_root_build_gradle(self, project_info: Dict):
+        """Generate the root build.gradle with common configurations"""
+        plugins_block = self._generate_plugins(project_info)
+        build_gradle = f"""plugins {{
+    {plugins_block}
+}}
+
+allprojects {{
+    group = '{project_info["group"]}'
+    version = '{project_info["version"]}'
+    
+    repositories {{
+        mavenCentral()
+{self._generate_repositories(project_info)}    }}
+}}
+
+subprojects {{
+    apply plugin: 'java'
+    apply plugin: 'io.spring.dependency-management'
+    
+    sourceCompatibility = '{project_info["properties"].get("java.version", "17")}'
+
+    dependencies {{
+        // Common dependencies for all modules
+{self._generate_dependencies(project_info)}    }}
+    
+    test {{
+        useJUnitPlatform()
+    }}
+}}"""
+        with open(os.path.join(self.project_path, "build.gradle"), "w") as f:
+            f.write(build_gradle)
+
+    def generate_module_build_gradle(self, module_path: str, module_info: Dict):
+        """Generate build.gradle for a specific module"""
+        module_specific_plugins = self._generate_plugins(module_info)
+
+        build_gradle = f"""plugins {{
+    {module_specific_plugins}
+}}
+
+dependencies {{
+{self._generate_dependencies(module_info)}}}
+
+// Module specific configurations
+{self._generate_module_specific_config(module_info)}
+"""
+        module_build_file = os.path.join(self.project_path, module_path, "build.gradle")
+        os.makedirs(os.path.dirname(module_build_file), exist_ok=True)
+        with open(module_build_file, "w") as f:
+            f.write(build_gradle)
+
+    def _generate_module_specific_config(self, module_info: Dict) -> str:
+        """Generate module-specific configurations"""
+        if module_info.get("packaging") == "war":
+            return "apply plugin: 'war'"
+        return ""
 
     def cleanup_maven_files(self):
         files_to_remove = ["pom.xml", "mvnw", "mvnw.cmd"]
@@ -280,14 +374,34 @@ class MavenToGradleConverter:
 
     def convert(self):
         try:
+            # Parse parent pom.xml
             project_info = self.parse_pom()
-            self.generate_build_gradle(project_info)
-            self.generate_settings_gradle(project_info)
+
+            if project_info["modules"]:
+                # This is a multi-module project
+                self.generate_settings_gradle(project_info)
+                self.generate_root_build_gradle(project_info)
+
+                # Convert each module
+                for module in project_info["modules"]:
+                    module_pom = os.path.join(self.project_path, module, "pom.xml")
+                    if os.path.exists(module_pom):
+                        module_converter = MavenToGradleConverter(
+                            os.path.join(self.project_path, module)
+                        )
+                        module_info = module_converter.parse_pom()
+                        self.generate_module_build_gradle(module, module_info)
+            else:
+                # Single module project
+                self.generate_build_gradle(project_info)
+                self.generate_settings_gradle(project_info)
+
             self.generate_gradle_wrapper()
             # self.cleanup_maven_files()
+
             print("Successfully converted Maven project to Gradle!")
             print("\nNext steps:")
-            print("1. Review the generated build.gradle file")
+            print("1. Review the generated build.gradle files")
             print("2. Run './gradlew clean build' to test the build")
             print("3. Run './gradlew bootRun' to start the application")
         except Exception as e:
