@@ -148,7 +148,8 @@ print(f"Condition pattern redundancy: {(1 - len(df['condition_keys'].unique()) /
 
 # 6. Temporal Analysis
 print("\n6. Temporal Analysis:")
-df['month'] = pd.to_datetime(df['timestamp']).dt.month
+df['timestamp'] = pd.to_datetime(df['timestamp'])
+df['month'] = df['timestamp'].dt.month
 monthly_rules = df['month'].value_counts().sort_index()
 peak_month = monthly_rules.idxmax()
 print(f"Peak rule creation month: {peak_month}")
@@ -467,16 +468,8 @@ def parse_condition_node(condition_node, indent=""):
                 child_conditions.append(f"{field_id}")
         
         # Join child conditions based on operator
-        if operator_type == "and":
-            result.append(f"({' AND '.join(child_conditions)})")
-        elif operator_type == "EQ_STR":
-            result.append(f"({' = '.join(child_conditions)})")
-        elif operator_type == "NOT_IN_LIST_STR":
-            field = child_conditions[0] if child_conditions else ""
-            values = child_conditions[1] if len(child_conditions) > 1 else ""
-            result.append(f"{field} NOT IN ({values})")
-        else:
-            result.append(f"({' '.join(child_conditions)})")
+        operator = operator_type if operator_type else " "
+        result.append(f"({operator.join(child_conditions)})")
     
     return " ".join(result)
 
